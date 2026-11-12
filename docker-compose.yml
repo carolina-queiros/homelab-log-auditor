@@ -30,7 +30,7 @@ services:
   node-01:
     image: ubuntu:22.04
     container_name: client_node_01
-    command: bash -c "apt-get update && apt-get install -y rsyslog && tail -f /dev/null"
+    command: bash -c "mkdir -p /var/log && touch /var/log/auth.log && tail -f /dev/null"
     volumes:
       - node01_logs:/var/log
     networks:
