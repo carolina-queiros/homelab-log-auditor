@@ -21,7 +21,7 @@ class LogDetector:
 
     # Padrões de ataque conhecidos
     SSH_FAILED_RE = re.compile(
-        r"Failed password for (?P<user>\S+) from (?P<ip>\d+\.\d+\.\d+\.\d+)"
+        r"Failed (?:password|publickey) for (?:invalid user )?(?P<user>\S+) from (?P<ip>\d+\.\d+\.\d+\.\d+)"
     )
     HTTP_ACCESS_RE = re.compile(
         r'(?P<ip>\d+\.\d+\.\d+\.\d+) - - \[.*?\] "(?P<method>\S+) (?P<path>\S+) HTTP/.*?" (?P<status>\d{3})'
