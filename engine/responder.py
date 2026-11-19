@@ -30,8 +30,11 @@ class FirewallResponder:
         return "none"
 
     def is_whitelisted(self, ip_str: str) -> bool:
-        addr = ipaddress.ip_address(ip_str)
-        return any(addr in net for net in self.whitelist)
+        try:
+            addr = ipaddress.ip_address(ip_str)
+            return any(addr in net for net in self.whitelist)
+        except ValueError:
+            return True
 
     def _ensure_nft_table(self) -> None:
         subprocess.run(["nft", "add", "table", "inet", "homelab_ips"], check=False, capture_output=True)
@@ -54,7 +57,7 @@ class FirewallResponder:
             if self.backend == "nftables":
                 self._ensure_nft_table()
                 subprocess.run(
-                    ["nft", "add", "rule", "inet", "homelab_ips", "input", "saddr", ip, "drop"],
+                    ["nft", "add", "rule", "inet", "homelab_ips", "input", "ip", "saddr", ip, "drop"],
                     check=True,
                     capture_output=True,
                 )
