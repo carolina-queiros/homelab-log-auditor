@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 import threading
@@ -27,6 +28,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .CRITICAL { background: #7f1d1d; color: #fecaca; }
     .HIGH { background: #7c2d12; color: #fed7aa; }
     .MEDIUM { background: #713f12; color: #fef08a; }
+    .LOW { background: #1e3a8a; color: #bfdbfe; }
     button { background: #ef4444; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: 600; }
     button:hover { background: #dc2626; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; color: #cbd5e1; }
@@ -52,6 +54,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </table>
 
   <script>
+    function cellWithText(text, isCode = false) {
+      const td = document.createElement('td');
+      if (isCode) {
+        const code = document.createElement('code');
+        code.textContent = text;
+        td.appendChild(code);
+      } else {
+        td.textContent = text;
+      }
+      return td;
+    }
+
     async function unbanIp(ip) {
       await fetch('/api/unban', {
         method: 'POST',
@@ -72,15 +86,58 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById('total-alerts').textContent = stats.total_alerts;
       document.getElementById('active-bans').textContent = stats.active_bans;
 
-      document.getElementById('bans-body').innerHTML = bans.map(b =>
-        `<tr><td><code>${b.ip}</code></td><td>${b.reason}</td><td>${b.remaining_seconds}s</td>` +
-        `<td><button onclick="unbanIp('${b.ip}')">Desbloquear</button></td></tr>`
-      ).join('') || '<tr><td colspan="4">Sem bloqueios ativos</td></tr>';
+      const bansBody = document.getElementById('bans-body');
+      bansBody.replaceChildren();
+      if (!bans.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 4;
+        td.textContent = 'Sem bloqueios ativos';
+        tr.appendChild(td);
+        bansBody.appendChild(tr);
+      } else {
+        for (const b of bans) {
+          const tr = document.createElement('tr');
+          tr.appendChild(cellWithText(b.ip, true));
+          tr.appendChild(cellWithText(b.reason));
+          tr.appendChild(cellWithText(`${b.remaining_seconds}s`));
+          const actionTd = document.createElement('td');
+          const btn = document.createElement('button');
+          btn.textContent = 'Desbloquear';
+          btn.addEventListener('click', () => unbanIp(b.ip));
+          actionTd.appendChild(btn);
+          tr.appendChild(actionTd);
+          bansBody.appendChild(tr);
+        }
+      }
 
-      document.getElementById('alerts-body').innerHTML = alerts.map(a =>
-        `<tr><td><span class="badge ${a.severity}">${a.severity}</span></td><td>${a.rule_id}</td>` +
-        `<td><code>${a.source_ip}</code></td><td>${a.description}</td><td><code>${a.raw_log}</code></td></tr>`
-      ).join('') || '<tr><td colspan="5">Sem alertas registados</td></tr>';
+      const alertsBody = document.getElementById('alerts-body');
+      alertsBody.replaceChildren();
+      if (!alerts.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 5;
+        td.textContent = 'Sem alertas registados';
+        tr.appendChild(td);
+        alertsBody.appendChild(tr);
+      } else {
+        for (const a of alerts) {
+          const tr = document.createElement('tr');
+          const sevTd = document.createElement('td');
+          const badge = document.createElement('span');
+          const allowed = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'];
+          const safeSev = allowed.includes(a.severity) ? a.severity : 'LOW';
+          badge.className = `badge ${safeSev}`;
+          badge.textContent = safeSev;
+          sevTd.appendChild(badge);
+          tr.appendChild(sevTd);
+          tr.appendChild(cellWithText(a.rule_id));
+          tr.appendChild(cellWithText(a.source_ip, true));
+          tr.appendChild(cellWithText(a.description));
+          tr.appendChild(cellWithText(a.raw_log, true));
+          alertsBody.appendChild(tr);
+        }
+      }
     }
     refresh();
     setInterval(refresh, 3000);
@@ -90,7 +147,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 """
 
 class DashboardServer:
-    def __init__(self, store: IncidentStore, responder: FirewallResponder, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, store: IncidentStore, responder: FirewallResponder, host: str = "127.0.0.1", port: int = 8080):
         self.store = store
         self.responder = responder
         self.host = host
@@ -105,10 +162,15 @@ class DashboardServer:
             def log_message(self, format, *args):
                 return
 
+            def _apply_security_headers(self):
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+
             def _send_json(self, data, status: int = 200):
                 body = json.dumps(data).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
+                self._apply_security_headers()
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -119,6 +181,7 @@ class DashboardServer:
                     html = DASHBOARD_HTML.encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self._apply_security_headers()
                     self.send_header("Content-Length", str(len(html)))
                     self.end_headers()
                     self.wfile.write(html)
@@ -136,12 +199,19 @@ class DashboardServer:
                 if urlparse(self.path).path != "/api/unban":
                     self._send_json({"error": "Not found"}, status=404)
                     return
-                length = int(self.headers.get("Content-Length", "0"))
-                payload = json.loads(self.rfile.read(length) or b"{}")
-                ip = payload.get("ip", "")
-                if responder.unblock_ip(ip):
-                    store.remove_ban(ip)
-                    self._send_json({"status": "unbanned", "ip": ip})
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    ip_raw = str(payload.get("ip", "")).strip()
+                    ip_obj = ipaddress.ip_address(ip_raw)
+                except (ValueError, json.JSONDecodeError):
+                    self._send_json({"error": "Invalid IP address payload"}, status=400)
+                    return
+
+                clean_ip = str(ip_obj)
+                if responder.unblock_ip(clean_ip):
+                    store.remove_ban(clean_ip)
+                    self._send_json({"status": "unbanned", "ip": clean_ip})
                 else:
                     self._send_json({"error": "Failed to unban IP"}, status=500)
 

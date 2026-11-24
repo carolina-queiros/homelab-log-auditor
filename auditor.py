@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from engine.config import AuditorConfig
+from engine.dashboard import DashboardServer
 from engine.detector import LogDetector
 from engine.notifier import WebhookNotifier
 from engine.responder import FirewallResponder
@@ -47,6 +48,8 @@ def main() -> int:
     parser.add_argument("--enforce", action="store_true", help="Ativa regras reais na firewall")
     parser.add_argument("--from-start", action="store_true", help="Lê os logs desde o início")
     parser.add_argument("--report", action="store_true", help="Mostra o resumo estatístico e sai")
+    parser.add_argument("--web", action="store_true", help="Ativa o dashboard web e API REST")
+    parser.add_argument("--web-port", type=int, default=8080, help="Porta do servidor web (default: 8080)")
     args = parser.parse_args()
 
     cfg = AuditorConfig.from_file(args.config)
@@ -72,6 +75,9 @@ def main() -> int:
     responder = FirewallResponder(dry_run=not enforce, whitelist_cidrs=whitelist)
     notifier = WebhookNotifier(webhook_url=webhook_url or None)
     tailer = LogTailer(file_paths=log_files)
+    dashboard = DashboardServer(store=store, responder=responder, port=args.web_port) if args.web else None
+    if dashboard:
+        dashboard.start()
 
     def reload_config(*_args) -> None:
         logger.info(f"Sinal SIGHUP recebido: a recarregar regras de '{args.config}'...")
@@ -114,6 +120,8 @@ def main() -> int:
     try:
         tailer.follow(on_line=handle_line, tick_callback=cleanup_expired, from_end=not args.from_start)
     except SystemExit:
+        if dashboard:
+            dashboard.stop()
         logger.info("A encerrar Homelab Log Auditor de forma limpa.")
     return 0
 
