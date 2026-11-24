@@ -1,0 +1,30 @@
+{
+  "log_files": [
+    "/var/log/auth.log",
+    "/var/log/nginx/access.log"
+  ],
+  "database_path": "auditor_state.db",
+  "detection": {
+    "brute_force_threshold": 5,
+    "window_seconds": 60,
+    "custom_rules": [
+      {
+        "id": "CUSTOM-SUDO-005",
+        "severity": "HIGH",
+        "pattern": "sudo:.*authentication failure.*rhost=(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+)",
+        "description": "Falha de autenticação sudo remota detetada"
+      }
+    ]
+  },
+  "ips": {
+    "enforce": false,
+    "ban_ttl_seconds": 3600,
+    "whitelist": [
+      "192.168.1.0/24",
+      "10.0.0.0/8"
+    ]
+  },
+  "notifications": {
+    "webhook_url": ""
+  }
+}
