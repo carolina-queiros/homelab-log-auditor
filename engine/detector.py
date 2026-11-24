@@ -2,7 +2,8 @@ import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
+from engine.config import CustomRuleConfig
 
 @dataclass
 class SecurityAlert:
@@ -15,11 +16,10 @@ class SecurityAlert:
 
 class LogDetector:
     """
-    Motor de análise de logs baseado em regras Regex e correlação temporal
-    (janela deslizante) para deteção de intrusões SSH e HTTP.
+    Motor de análise de logs baseado em regras Regex (nativas e customizadas)
+    e correlação temporal (janela deslizante) para deteção de intrusões.
     """
 
-    # Padrões de ataque conhecidos
     SSH_FAILED_RE = re.compile(
         r"Failed (?:password|publickey) for (?:invalid user )?(?P<user>\S+) from (?P<ip>\d+\.\d+\.\d+\.\d+)"
     )
@@ -33,16 +33,30 @@ class LogDetector:
     PATH_TRAVERSAL_RE = re.compile(r"(?:\.\./|\.\.%2f|/etc/passwd|/etc/shadow|\.env)", re.IGNORECASE)
     SCANNER_PATHS_RE = re.compile(r"(?:/wp-admin|/wp-login\.php|/phpmyadmin|/\.git/config|/xmlrpc\.php)", re.IGNORECASE)
 
-    def __init__(self, brute_force_threshold: int = 5, window_seconds: int = 60):
+    def __init__(
+        self,
+        brute_force_threshold: int = 5,
+        window_seconds: int = 60,
+        custom_rules: Sequence[CustomRuleConfig] = (),
+    ):
         self.threshold = brute_force_threshold
         self.window = window_seconds
-        # Guarda timestamps de falhas por IP: { "1.2.3.4": deque([t1, t2, ...]) }
+        self.custom_rules: list[CustomRuleConfig] = list(custom_rules)
         self.failed_attempts: dict[str, deque[float]] = defaultdict(deque)
+
+    def update_rules(
+        self,
+        brute_force_threshold: int,
+        window_seconds: int,
+        custom_rules: Sequence[CustomRuleConfig],
+    ) -> None:
+        self.threshold = brute_force_threshold
+        self.window = window_seconds
+        self.custom_rules = list(custom_rules)
 
     def _check_brute_force(self, ip: str, now: float) -> bool:
         attempts = self.failed_attempts[ip]
         attempts.append(now)
-        # Remove tentativas fora da janela temporal
         while attempts and (now - attempts[0]) > self.window:
             attempts.popleft()
         return len(attempts) >= self.threshold
@@ -53,13 +67,26 @@ class LogDetector:
         if not line:
             return None
 
-        # 1. Análise de logs SSH (auth.log)
+        # 1. Regras customizadas carregadas via config.json
+        for rule in self.custom_rules:
+            match = rule.pattern.search(line)
+            if match:
+                return SecurityAlert(
+                    timestamp=now,
+                    rule_id=rule.rule_id,
+                    severity=rule.severity,
+                    source_ip=match.group("ip"),
+                    description=rule.description,
+                    raw_log=line,
+                )
+
+        # 2. Análise de logs SSH (auth.log)
         ssh_match = self.SSH_FAILED_RE.search(line)
         if ssh_match:
             ip = ssh_match.group("ip")
             user = ssh_match.group("user")
             if self._check_brute_force(ip, now):
-                self.failed_attempts[ip].clear()  # Reinicia após disparo para evitar spam
+                self.failed_attempts[ip].clear()
                 return SecurityAlert(
                     timestamp=now,
                     rule_id="SSH-BRUTE-001",
@@ -70,7 +97,7 @@ class LogDetector:
                 )
             return None
 
-        # 2. Análise de logs HTTP (Nginx / Apache)
+        # 3. Análise de logs HTTP (Nginx / Apache)
         http_match = self.HTTP_ACCESS_RE.search(line)
         if http_match:
             ip = http_match.group("ip")

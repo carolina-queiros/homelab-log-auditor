@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from engine.config import AuditorConfig
 from engine.detector import LogDetector
 from engine.notifier import WebhookNotifier
 from engine.responder import FirewallResponder
@@ -35,32 +36,59 @@ def print_report(store: IncidentStore) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Homelab Log Auditor — Mini-SIEM & IPS em tempo real")
-    parser.add_argument("--logs", nargs="+", default=["/var/log/auth.log", "/var/log/nginx/access.log"], help="Ficheiros de log a monitorizar")
-    parser.add_argument("--db", default="auditor_state.db", help="Caminho para a base de dados SQLite")
-    parser.add_argument("--threshold", type=int, default=5, help="Número de falhas até bloquear")
-    parser.add_argument("--window", type=int, default=60, help="Janela temporal em segundos")
-    parser.add_argument("--ban-ttl", type=int, default=3600, help="Duração do bloqueio IPS em segundos")
-    parser.add_argument("--whitelist", nargs="*", default=[], help="CIDRs ou IPs protegidos contra bloqueio")
+    parser.add_argument("--config", default="config.json", help="Ficheiro de configuração JSON")
+    parser.add_argument("--logs", nargs="+", help="Sobrepõe ficheiros de log a monitorizar")
+    parser.add_argument("--db", help="Sobrepõe caminho para a base de dados SQLite")
+    parser.add_argument("--threshold", type=int, help="Sobrepõe número de falhas até bloquear")
+    parser.add_argument("--window", type=int, help="Sobrepõe janela temporal em segundos")
+    parser.add_argument("--ban-ttl", type=int, help="Sobrepõe duração do bloqueio IPS em segundos")
+    parser.add_argument("--whitelist", nargs="*", help="Sobrepõe CIDRs/IPs protegidos")
     parser.add_argument("--webhook", default=os.getenv("AUDITOR_WEBHOOK_URL"), help="URL de webhook Discord/Slack")
-    parser.add_argument("--enforce", action="store_true", help="Aplica regras reais na firewall (sem esta flag corre em dry-run)")
-    parser.add_argument("--from-start", action="store_true", help="Lê os logs desde o início em vez de apenas novas linhas")
-    parser.add_argument("--report", action="store_true", help="Mostra o resumo estatístico da base de dados e sai")
+    parser.add_argument("--enforce", action="store_true", help="Ativa regras reais na firewall")
+    parser.add_argument("--from-start", action="store_true", help="Lê os logs desde o início")
+    parser.add_argument("--report", action="store_true", help="Mostra o resumo estatístico e sai")
     args = parser.parse_args()
 
-    store = IncidentStore(db_path=args.db)
+    cfg = AuditorConfig.from_file(args.config)
+    log_files = args.logs or cfg.log_files
+    db_path = args.db or cfg.database_path
+    threshold = args.threshold if args.threshold is not None else cfg.brute_force_threshold
+    window = args.window if args.window is not None else cfg.window_seconds
+    ban_ttl = args.ban_ttl if args.ban_ttl is not None else cfg.ban_ttl_seconds
+    whitelist = args.whitelist if args.whitelist is not None else cfg.whitelist
+    webhook_url = args.webhook or cfg.webhook_url
+    enforce = args.enforce or cfg.enforce
+
+    store = IncidentStore(db_path=db_path)
     if args.report:
         print_report(store)
         return 0
 
-    detector = LogDetector(brute_force_threshold=args.threshold, window_seconds=args.window)
-    responder = FirewallResponder(dry_run=not args.enforce, whitelist_cidrs=args.whitelist)
-    notifier = WebhookNotifier(webhook_url=args.webhook)
-    tailer = LogTailer(file_paths=args.logs)
+    detector = LogDetector(
+        brute_force_threshold=threshold,
+        window_seconds=window,
+        custom_rules=cfg.custom_rules,
+    )
+    responder = FirewallResponder(dry_run=not enforce, whitelist_cidrs=whitelist)
+    notifier = WebhookNotifier(webhook_url=webhook_url or None)
+    tailer = LogTailer(file_paths=log_files)
+
+    def reload_config(*_args) -> None:
+        logger.info(f"Sinal SIGHUP recebido: a recarregar regras de '{args.config}'...")
+        new_cfg = AuditorConfig.from_file(args.config)
+        detector.update_rules(
+            brute_force_threshold=args.threshold if args.threshold is not None else new_cfg.brute_force_threshold,
+            window_seconds=args.window if args.window is not None else new_cfg.window_seconds,
+            custom_rules=new_cfg.custom_rules,
+        )
+        logger.info(f"Configuração recarregada ({len(new_cfg.custom_rules)} regra(s) customizada(s) ativa(s)).")
 
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, reload_config)
 
-    mode = "ENFORCE (FIREWALL ATIVA)" if args.enforce else "DRY-RUN (SIMULAÇÃO)"
+    mode = "ENFORCE (FIREWALL ATIVA)" if enforce else "DRY-RUN (SIMULAÇÃO)"
     logger.info(f"A iniciar Homelab Log Auditor em modo {mode} | Backend: {responder.backend}")
 
     def handle_line(line: str, source: Path) -> None:
@@ -75,8 +103,8 @@ def main() -> int:
             return
 
         if responder.block_ip(alert.source_ip, alert.description):
-            store.register_ban(alert.source_ip, alert.rule_id, ttl_seconds=args.ban_ttl)
-            notifier.send_alert(alert, f"Bloqueado por {args.ban_ttl}s ({responder.backend})")
+            store.register_ban(alert.source_ip, alert.rule_id, ttl_seconds=ban_ttl)
+            notifier.send_alert(alert, f"Bloqueado por {ban_ttl}s ({responder.backend})")
 
     def cleanup_expired() -> None:
         for ip in store.get_expired_bans():
