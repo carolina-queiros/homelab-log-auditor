@@ -116,3 +116,40 @@ class IncidentStore:
                 "SELECT source_ip, COUNT(*) as cnt FROM alerts GROUP BY source_ip ORDER BY cnt DESC LIMIT 5"
             ).fetchall()
             return total_alerts, active_bans, top_ips
+
+    def get_recent_alerts(self, limit: int = 25) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, timestamp, rule_id, severity, source_ip, description, raw_log FROM alerts ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "id": r[0],
+                    "timestamp": r[1],
+                    "rule_id": r[2],
+                    "severity": r[3],
+                    "source_ip": r[4],
+                    "description": r[5],
+                    "raw_log": r[6],
+                }
+                for r in rows
+            ]
+
+    def get_active_bans_list(self) -> list[dict]:
+        now = time.time()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT ip, reason, banned_at, expires_at FROM active_bans WHERE expires_at > ? ORDER BY banned_at DESC",
+                (now,),
+            ).fetchall()
+            return [
+                {
+                    "ip": r[0],
+                    "reason": r[1],
+                    "banned_at": r[2],
+                    "expires_at": r[3],
+                    "remaining_seconds": max(0, int(r[3] - now)),
+                }
+                for r in rows
+            ]
