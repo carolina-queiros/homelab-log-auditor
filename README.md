@@ -1,92 +1,35 @@
-# Linux Log Auditing & Telemetry Pipeline
+# Homelab Log Auditor (Mini-SIEM & Active IPS)
 
-A lightweight centralized logging setup built to collect, index, and query Linux authentication and system logs across nodes using Promtail, Grafana Loki, and Grafana.
+Motor leve de deteção de intrusões e resposta ativa em tempo real para ambientes Linux, escrito em Python puro (zero dependências externas).
 
----
+## Arquitetura
 
-## Why I Built This
+- **`engine/tailer.py`**: Leitor contínuo de logs (`tail -F`) com deteção automática de *log rotation* por alteração de *inode* ou truncagem.
+- **`engine/detector.py`**: Motor de análise por expressões regulares e correlação temporal (*sliding window*) para identificar ataques SSH e HTTP.
+- **`engine/storage.py`**: Persistência em SQLite (`auditor_state.db`) para histórico de alertas e gestão de bloqueios ativos com expiração (TTL).
+- **`engine/responder.py`**: Módulo IPS que aplica bloqueios dinâmicos na firewall Linux via `nftables` (com *fallback* para `iptables`), suportando *whitelist* de redes seguras e modo `--dry-run`.
+- **`engine/notifier.py`**: Envio de alertas estruturados via Webhook (Discord/Slack).
 
-While running multiple local Linux VMs for coursework and testing, checking `/var/log/auth.log` and `journalctl` meant opening separate SSH sessions for every machine whenever something broke or behaved strangely.
+## Regras de Deteção Implementadas
 
-I put this together to learn how log-shipping agents work in practice and to have a single dashboard where I can inspect failed SSH logins, sudo usage, and system events in real time.
+| ID | Severidade | Vetor | Descrição |
+| :--- | :--- | :--- | :--- |
+| `SSH-BRUTE-001` | `HIGH` | SSH (`auth.log`) | Deteta *N* falhas de autenticação (`password` ou `publickey`, incluindo `invalid user`) numa janela temporal configurável. |
+| `WEB-SQLI-002` | `CRITICAL` | HTTP Access Log | Identifica payloads de SQL Injection (`UNION SELECT`, `OR 1=1`, `SLEEP()`, etc.) nos pedidos. |
+| `WEB-LFI-003` | `HIGH` | HTTP Access Log | Deteta tentativas de *Path Traversal* (`../`, `/etc/passwd`, `.env`). |
+| `WEB-SCAN-004` | `MEDIUM` | HTTP Access Log | Deteta enumeração automatizada de caminhos sensíveis (`/wp-login.php`, `/phpmyadmin`, `/.git/config`). |
 
----
+## Utilização
 
-## Architecture
+```bash
+# Modo simulação (dry-run) seguro para validação sem alterações na firewall
+python3 auditor.py --logs /var/log/auth.log /var/log/nginx/access.log --whitelist 192.168.1.0/24
 
-    [ Target Node (node-01) ]
-     └── /var/log/auth.log
-          └── Promtail (Agent)
-                    │
-                    │ HTTP push
-                    ▼
-    [ Monitoring Host ]
-     ├── Grafana Loki  (:3100) — Log ingestion & label indexing
-     └── Grafana       (:3000) — Dashboards & LogQL queries
+# Modo ativo (IPS) com bloqueio real via nftables/iptables (requer root)
+sudo python3 auditor.py --enforce --threshold 5 --window 60 --ban-ttl 3600
 
-* **Promtail:** Tails `/var/log/auth.log` on the target node and attaches basic metadata labels (`host="node-01"`, `job="secure_logs"`).
-* **Grafana Loki:** Stores incoming log streams and indexes only the labels rather than full raw text, keeping memory usage low.
-* **Grafana:** Queries Loki over HTTP and displays live logs and rate metrics.
+# Consultar relatório estatístico de incidentes e bloqueios ativos
+python3 auditor.py --report
 
----
-
-## Project Structure
-
-    .
-    ├── docker-compose.yml           # Container network and service definitions
-    ├── configs/
-    │   ├── loki-config.yaml         # Loki storage schema and port settings
-    │   └── promtail-config.yaml     # Scrape targets, log paths, and labels
-    ├── scripts/
-    │   ├── simulate_attack.sh       # Generates sample failed SSH logins and sudo events
-    │   └── verify_pipeline.sh       # Checks Loki health and confirms stream ingestion
-    └── README.md
-
----
-
-## Quickstart
-
-### 1. Start the Stack
-
-    docker compose up -d
-
-Check that all four containers are running:
-
-    docker compose ps
-
-### 2. Generate Sample Auth Events
-Run the test script to write simulated failed SSH attempts and a sudo command into `node-01`:
-
-    ./scripts/simulate_attack.sh
-
-### 3. Verify Log Delivery
-Confirm that Loki is healthy and has indexed the logs from `node-01`:
-
-    ./scripts/verify_pipeline.sh
-
----
-
-## Grafana Setup & Queries
-
-1. Open `http://localhost:3000` in your browser (`admin` / `admin`).
-2. Go to **Connections > Data Sources > Add data source** and pick **Loki**.
-3. Set the URL to `http://loki:3100` and click **Save & Test**.
-4. Open **Explore**, select the **Loki** data source, and try these LogQL queries:
-
-* **All authentication logs from `node-01`:** `{host="node-01", job="secure_logs"}`
-* **Failed SSH password attempts:** `{host="node-01"} |= "Failed password"`
-* **Failed login rate per minute:** `rate({host="node-01"} |= "Failed password" [1m])`
-* **Executed `sudo` commands:** `{host="node-01"} |= "COMMAND="`
-
----
-
-## Live Preview
-
-![Grafana Loki Log Explorer](docs/grafana-logs.png)
-
----
-
-## Notes & Takeaways
-
-* **Volume permissions:** Promtail needed read access to `/var/log/auth.log` generated inside the target container, handled by sharing a named volume mounted read-only (`:ro`) on the agent.
-* **Label cardinality:** Keeping dynamic values like source IP addresses out of Loki labels avoids index bloat—IPs stay in the raw log line and get filtered via LogQL (`|=`).
+# Executar testes unitários
+python3 -m unittest discover -s tests -v
