@@ -103,8 +103,8 @@ def main() -> int:
             return
 
         if responder.block_ip(alert.source_ip, alert.description):
-            store.register_ban(alert.source_ip, alert.rule_id, ttl_seconds=ban_ttl)
-            notifier.send_alert(alert, f"Bloqueado por {ban_ttl}s ({responder.backend})")
+            applied_ttl = store.register_ban(alert.source_ip, alert.rule_id, base_ttl_seconds=ban_ttl)
+            notifier.send_alert(alert, f"Bloqueado por {applied_ttl}s ({responder.backend})")
 
     def cleanup_expired() -> None:
         for ip in store.get_expired_bans():

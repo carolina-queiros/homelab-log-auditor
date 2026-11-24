@@ -73,15 +73,17 @@ class IncidentStore:
             row = conn.execute("SELECT COUNT(*) FROM ban_history WHERE ip = ?", (ip,)).fetchone()
             return int(row[0]) if row else 0
 
+    MAX_BAN_TTL_SECONDS = 604800  # Teto máximo de 7 dias
+
     def register_ban(self, ip: str, reason: str, base_ttl_seconds: int = 3600) -> int:
         now = time.time()
         with self._connect() as conn:
+            prior_offenses = conn.execute("SELECT COUNT(*) FROM ban_history WHERE ip = ?", (ip,)).fetchone()[0]
+            escalated_ttl = min(base_ttl_seconds * (4 ** prior_offenses), self.MAX_BAN_TTL_SECONDS)
             conn.execute(
                 "INSERT INTO ban_history (ip, reason, banned_at, ttl_applied) VALUES (?, ?, ?, ?)",
-                (ip, reason, now, base_ttl_seconds),
+                (ip, reason, now, escalated_ttl),
             )
-            offenses = conn.execute("SELECT COUNT(*) FROM ban_history WHERE ip = ?", (ip,)).fetchone()[0]
-            escalated_ttl = base_ttl_seconds * (4 ** offenses)
 
             conn.execute(
                 """
