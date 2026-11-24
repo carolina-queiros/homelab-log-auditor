@@ -6,8 +6,8 @@ from engine.detector import SecurityAlert
 
 class IncidentStore:
     """
-    Persistência local em SQLite para histórico de alertas SIEM e controlo
-    de estado dos bloqueios ativos (IPS) com expiração temporal (TTL).
+    Persistência local em SQLite para histórico de alertas SIEM, controlo
+    de bloqueios ativos (IPS) e histórico de reincidência (escalation).
     """
 
     def __init__(self, db_path: str = "auditor_state.db"):
@@ -38,8 +38,17 @@ class IncidentStore:
                     expires_at REAL NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS ban_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    banned_at REAL NOT NULL,
+                    ttl_applied INTEGER NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_alerts_ip ON alerts(source_ip);
                 CREATE INDEX IF NOT EXISTS idx_bans_exp ON active_bans(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_history_ip ON ban_history(ip);
                 """
             )
 
@@ -59,9 +68,21 @@ class IncidentStore:
             row = conn.execute("SELECT expires_at FROM active_bans WHERE ip = ?", (ip,)).fetchone()
             return bool(row and row[0] > now)
 
-    def register_ban(self, ip: str, reason: str, ttl_seconds: int = 3600) -> None:
+    def get_offense_count(self, ip: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM ban_history WHERE ip = ?", (ip,)).fetchone()
+            return int(row[0]) if row else 0
+
+    def register_ban(self, ip: str, reason: str, base_ttl_seconds: int = 3600) -> int:
         now = time.time()
         with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO ban_history (ip, reason, banned_at, ttl_applied) VALUES (?, ?, ?, ?)",
+                (ip, reason, now, base_ttl_seconds),
+            )
+            offenses = conn.execute("SELECT COUNT(*) FROM ban_history WHERE ip = ?", (ip,)).fetchone()[0]
+            escalated_ttl = base_ttl_seconds * (4 ** offenses)
+
             conn.execute(
                 """
                 INSERT INTO active_bans (ip, reason, banned_at, expires_at)
@@ -71,8 +92,9 @@ class IncidentStore:
                     banned_at = excluded.banned_at,
                     expires_at = excluded.expires_at
                 """,
-                (ip, reason, now, now + ttl_seconds),
+                (ip, reason, now, now + escalated_ttl),
             )
+        return escalated_ttl
 
     def get_expired_bans(self, now: float | None = None) -> List[str]:
         now = now or time.time()
