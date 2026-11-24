@@ -1,7 +1,12 @@
+import json
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
+from engine.config import AuditorConfig
+from engine.dashboard import DashboardServer
 from engine.detector import LogDetector
 from engine.responder import FirewallResponder
 from engine.storage import IncidentStore
@@ -26,7 +31,6 @@ class TestMiniSIEM(unittest.TestCase):
 
         self.assertIsNone(detector.inspect_line(sample, now=100.0))
         self.assertIsNone(detector.inspect_line(sample, now=110.0))
-        # 50 segundos depois (> window de 30s), as duas primeiras tentativas já expiraram
         self.assertIsNone(detector.inspect_line(sample, now=150.0))
 
     def test_http_sqli_and_lfi_detection(self):
@@ -44,24 +48,91 @@ class TestMiniSIEM(unittest.TestCase):
         self.assertIsNotNone(alert_lfi)
         self.assertEqual(alert_lfi.rule_id, "WEB-LFI-003")
 
+    def test_custom_config_and_invalid_regex_filtering(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / "config.json"
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "detection": {
+                            "brute_force_threshold": 4,
+                            "custom_rules": [
+                                {
+                                    "id": "CUSTOM-VPN-01",
+                                    "severity": "HIGH",
+                                    "pattern": r"openvpn.*TLS Error from (?P<ip>\d+\.\d+\.\d+\.\d+)",
+                                    "description": "Falha TLS OpenVPN",
+                                },
+                                {
+                                    "id": "BROKEN-REGEX",
+                                    "pattern": "[unclosed",
+                                },
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = AuditorConfig.from_file(cfg_path)
+            self.assertEqual(cfg.brute_force_threshold, 4)
+            self.assertEqual(len(cfg.custom_rules), 1)
+            self.assertEqual(cfg.custom_rules[0].rule_id, "CUSTOM-VPN-01")
+
+            detector = LogDetector(custom_rules=cfg.custom_rules)
+            alert = detector.inspect_line("Nov 24 12:00:00 gw openvpn[512]: TLS Error from 203.0.113.42")
+            self.assertIsNotNone(alert)
+            self.assertEqual(alert.rule_id, "CUSTOM-VPN-01")
+            self.assertEqual(alert.source_ip, "203.0.113.42")
+
     def test_whitelist_prevents_self_lockout(self):
         responder = FirewallResponder(dry_run=True, whitelist_cidrs=["192.168.1.0/24"])
         self.assertFalse(responder.block_ip("127.0.0.1", "test"))
         self.assertFalse(responder.block_ip("192.168.1.45", "test"))
         self.assertTrue(responder.block_ip("203.0.113.99", "malicious scan"))
 
-    def test_sqlite_ban_lifecycle(self):
+    def test_sqlite_progressive_escalation_and_cap(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_file = Path(tmpdir) / "test.db"
             store = IncidentStore(db_path=str(db_file))
 
-            store.register_ban("198.51.100.23", "SSH-BRUTE-001", ttl_seconds=60)
+            ttl1 = store.register_ban("198.51.100.23", "SSH-BRUTE-001", base_ttl_seconds=100)
+            ttl2 = store.register_ban("198.51.100.23", "SSH-BRUTE-001", base_ttl_seconds=100)
+            ttl3 = store.register_ban("198.51.100.23", "SSH-BRUTE-001", base_ttl_seconds=100)
+
+            self.assertEqual(ttl1, 100)
+            self.assertEqual(ttl2, 400)
+            self.assertEqual(ttl3, 1600)
             self.assertTrue(store.is_banned("198.51.100.23"))
 
             expired = store.get_expired_bans(now=9999999999.0)
             self.assertIn("198.51.100.23", expired)
             store.remove_ban("198.51.100.23")
             self.assertFalse(store.is_banned("198.51.100.23"))
+
+    def test_dashboard_api_endpoints(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = IncidentStore(db_path=str(Path(tmpdir) / "web.db"))
+            responder = FirewallResponder(dry_run=True)
+            server = DashboardServer(store=store, responder=responder, host="127.0.0.1", port=0)
+            server.start()
+            port = server._server.server_address[1]
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/stats") as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    self.assertEqual(data["total_alerts"], 0)
+                    self.assertEqual(data["active_bans"], 0)
+
+                bad_req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/unban",
+                    data=json.dumps({"ip": "not-an-ip; rm -rf /"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(bad_req)
+                self.assertEqual(ctx.exception.code, 400)
+            finally:
+                server.stop()
 
 
 if __name__ == "__main__":

@@ -1,16 +1,19 @@
 # Homelab Log Auditor (Mini-SIEM & Active IPS)
 
-Motor leve de deteção de intrusões e resposta ativa em tempo real para ambientes Linux, escrito em Python puro (zero dependências externas).
+Sistema leve de deteção de intrusões (SIEM), resposta ativa na firewall (IPS) e observabilidade em tempo real para ambientes Linux, escrito em Python puro (biblioteca padrão, zero dependências externas).
 
-## Arquitetura
+## Arquitetura Modular
 
+- **`engine/config.py` & `config.json`**: Gestão de configuração externa com validação de expressões regulares e suporte para recarga dinâmica sem paragem via sinal `SIGHUP`.
 - **`engine/tailer.py`**: Leitor contínuo de logs (`tail -F`) com deteção automática de *log rotation* por alteração de *inode* ou truncagem.
-- **`engine/detector.py`**: Motor de análise por expressões regulares e correlação temporal (*sliding window*) para identificar ataques SSH e HTTP.
-- **`engine/storage.py`**: Persistência em SQLite (`auditor_state.db`) para histórico de alertas e gestão de bloqueios ativos com expiração (TTL).
-- **`engine/responder.py`**: Módulo IPS que aplica bloqueios dinâmicos na firewall Linux via `nftables` (com *fallback* para `iptables`), suportando *whitelist* de redes seguras e modo `--dry-run`.
-- **`engine/notifier.py`**: Envio de alertas estruturados via Webhook (Discord/Slack).
+- **`engine/detector.py`**: Motor de análise por regras Regex (nativas + customizadas) e correlação temporal (*sliding window*).
+- **`engine/storage.py`**: Persistência em SQLite para alertas, bloqueios ativos com TTL e **ban progressivo (*escalation*)** para IPs reincidentes (`1x` $\rightarrow$ `4x` $\rightarrow$ `16x`, até ao teto de 7 dias).
+- **`engine/responder.py`**: Módulo IPS que aplica bloqueios dinâmicos na firewall Linux via `nftables` (com *fallback* para `iptables`), *whitelist* CIDR e modo `--dry-run`.
+- **`engine/dashboard.py`**: Servidor HTTP multi-thread com API REST (`/api/stats`, `/api/alerts`, `/api/bans`, `/api/unban`) e dashboard web em tempo real protegido contra XSS.
+- **`engine/notifier.py`**: Alertas estruturados via Webhook (Discord/Slack).
+- **`deploy/` & `Dockerfile`**: Unit `systemd` endurecida (`ProtectSystem=strict`, `CAP_NET_ADMIN`) e imagem Docker sem privilégios (`USER auditor`).
 
-## Regras de Deteção Implementadas
+## Regras de Deteção Nativas
 
 | ID | Severidade | Vetor | Descrição |
 | :--- | :--- | :--- | :--- |
@@ -22,14 +25,17 @@ Motor leve de deteção de intrusões e resposta ativa em tempo real para ambien
 ## Utilização
 
 ```bash
-# Modo simulação (dry-run) seguro para validação sem alterações na firewall
-python3 auditor.py --logs /var/log/auth.log /var/log/nginx/access.log --whitelist 192.168.1.0/24
+# Modo simulação (dry-run) com dashboard web ativo em [http://127.0.0.1:8080](http://127.0.0.1:8080)
+python3 auditor.py --config config.json --web
 
-# Modo ativo (IPS) com bloqueio real via nftables/iptables (requer root)
-sudo python3 auditor.py --enforce --threshold 5 --window 60 --ban-ttl 3600
+# Modo ativo (IPS) com bloqueio real via nftables/iptables
+sudo python3 auditor.py --config config.json --enforce --web
 
-# Consultar relatório estatístico de incidentes e bloqueios ativos
+# Recarregar regras do config.json em tempo real sem reiniciar o daemon
+kill -HUP $(pgrep -f auditor.py)
+
+# Consultar relatório estatístico na consola
 python3 auditor.py --report
 
-# Executar testes unitários
+# Executar suíte completa de testes unitários
 python3 -m unittest discover -s tests -v
