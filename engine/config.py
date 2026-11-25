@@ -30,7 +30,7 @@ class AuditorConfig:
     def from_file(cls, path: str | Path) -> "AuditorConfig":
         cfg_path = Path(path)
         if not cfg_path.exists():
-            logger.warning(f"Ficheiro de configuração '{cfg_path}' não encontrado; a usar valores por omissão.")
+            logger.warning(f"Configuration file '{cfg_path}' not found; falling back to defaults.")
             return cls()
 
         raw: dict[str, Any] = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -45,18 +45,18 @@ class AuditorConfig:
             try:
                 compiled = re.compile(raw_pattern)
                 if "ip" not in compiled.groupindex:
-                    logger.error(f"Regra '{rule_id}' ignorada: o regex tem de incluir o grupo nomeado (?P<ip>...).")
+                    logger.error(f"Rule '{rule_id}' skipped: pattern must define a named (?P<ip>...) group.")
                     continue
                 valid_rules.append(
                     CustomRuleConfig(
                         rule_id=rule_id,
                         severity=entry.get("severity", "MEDIUM").upper(),
                         pattern=compiled,
-                        description=entry.get("description", "Regra customizada acionada"),
+                        description=entry.get("description", "Custom detection rule triggered"),
                     )
                 )
             except re.error as exc:
-                logger.error(f"Regra '{rule_id}' ignorada por regex inválido ({exc}): {raw_pattern}")
+                logger.error(f"Rule '{rule_id}' skipped due to invalid regex ({exc}): {raw_pattern}")
 
         return cls(
             log_files=raw.get("log_files", ["/var/log/auth.log", "/var/log/nginx/access.log"]),

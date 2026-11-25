@@ -16,8 +16,8 @@ class SecurityAlert:
 
 class LogDetector:
     """
-    Motor de análise de logs baseado em regras Regex (nativas e customizadas)
-    e correlação temporal (janela deslizante) para deteção de intrusões.
+    Regex-based log analysis engine (built-in + custom rules) with sliding-window
+    temporal correlation for intrusion detection.
     """
 
     SSH_FAILED_RE = re.compile(
@@ -67,7 +67,6 @@ class LogDetector:
         if not line:
             return None
 
-        # 1. Regras customizadas carregadas via config.json
         for rule in self.custom_rules:
             match = rule.pattern.search(line)
             if match:
@@ -80,7 +79,6 @@ class LogDetector:
                     raw_log=line,
                 )
 
-        # 2. Análise de logs SSH (auth.log)
         ssh_match = self.SSH_FAILED_RE.search(line)
         if ssh_match:
             ip = ssh_match.group("ip")
@@ -92,12 +90,11 @@ class LogDetector:
                     rule_id="SSH-BRUTE-001",
                     severity="HIGH",
                     source_ip=ip,
-                    description=f"Força bruta SSH detetada ({self.threshold}+ falhas em {self.window}s, último user: '{user}')",
+                    description=f"SSH brute-force detected ({self.threshold}+ failures within {self.window}s, last user: '{user}')",
                     raw_log=line,
                 )
             return None
 
-        # 3. Análise de logs HTTP (Nginx / Apache)
         http_match = self.HTTP_ACCESS_RE.search(line)
         if http_match:
             ip = http_match.group("ip")
@@ -110,7 +107,7 @@ class LogDetector:
                     rule_id="WEB-SQLI-002",
                     severity="CRITICAL",
                     source_ip=ip,
-                    description=f"Tentativa de SQL Injection detetada no pedido: {path}",
+                    description=f"SQL Injection payload detected in HTTP request: {path}",
                     raw_log=line,
                 )
 
@@ -120,7 +117,7 @@ class LogDetector:
                     rule_id="WEB-LFI-003",
                     severity="HIGH",
                     source_ip=ip,
-                    description=f"Tentativa de Path Traversal / leitura de ficheiros sensíveis: {path}",
+                    description=f"Path Traversal / sensitive file probe detected: {path}",
                     raw_log=line,
                 )
 
@@ -132,7 +129,7 @@ class LogDetector:
                         rule_id="WEB-SCAN-004",
                         severity="MEDIUM",
                         source_ip=ip,
-                        description=f"Reconhecimento automatizado / Web Vulnerability Scanner detetado ({path})",
+                        description=f"Automated web vulnerability scanner activity detected ({path})",
                         raw_log=line,
                     )
 

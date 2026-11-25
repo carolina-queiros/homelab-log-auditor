@@ -12,7 +12,7 @@
         "id": "CUSTOM-SUDO-005",
         "severity": "HIGH",
         "pattern": "sudo:.*authentication failure.*rhost=(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+)",
-        "description": "Falha de autenticação sudo remota detetada"
+        "description": "Remote sudo authentication failure detected"
       }
     ]
   },
