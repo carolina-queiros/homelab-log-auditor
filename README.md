@@ -1,5 +1,7 @@
 # Homelab Log Auditor — Real-Time Mini-SIEM & Active IPS
 
+[![CI](https://github.com/carolina-queiros/homelab-log-auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/carolina-queiros/homelab-log-auditor/actions/workflows/ci.yml)
+
 ## System Architecture
 
 ```mermaid
