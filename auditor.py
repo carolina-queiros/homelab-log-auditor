@@ -53,6 +53,7 @@ def main() -> int:
     parser.add_argument("--export-json", help="Export recorded alerts to a JSON file and exit")
     parser.add_argument("--web", action="store_true", help="Start real-time Web Dashboard and REST API")
     parser.add_argument("--web-port", type=int, default=8080, help="HTTP port for Web Dashboard (default: 8080)")
+    parser.add_argument("--api-key", default=os.getenv("AUDITOR_API_KEY"), help="Optional API key required for /api/unban and /api/export")
     args = parser.parse_args()
 
     cfg = AuditorConfig.from_file(args.config)
@@ -90,7 +91,7 @@ def main() -> int:
     responder = FirewallResponder(dry_run=not enforce, whitelist_cidrs=whitelist)
     notifier = WebhookNotifier(webhook_url=webhook_url or None)
     tailer = LogTailer(file_paths=log_files)
-    dashboard = DashboardServer(store=store, responder=responder, port=args.web_port) if args.web else None
+    dashboard = DashboardServer(store=store, responder=responder, port=args.web_port, api_key=args.api_key or None) if args.web else None
     if dashboard:
         dashboard.start()
 
