@@ -54,6 +54,7 @@ def main() -> int:
     parser.add_argument("--web", action="store_true", help="Start real-time Web Dashboard and REST API")
     parser.add_argument("--web-port", type=int, default=8080, help="HTTP port for Web Dashboard (default: 8080)")
     parser.add_argument("--api-key", default=os.getenv("AUDITOR_API_KEY"), help="Optional API key required for /api/unban and /api/export")
+    parser.add_argument("--api-key", default=os.getenv("AUDITOR_API_KEY"), help="Optional API key required for /api/unban and /api/export")
     args = parser.parse_args()
 
     cfg = AuditorConfig.from_file(args.config)

@@ -1,6 +1,7 @@
 import csv
 import io
 import hmac
+import hmac
 import ipaddress
 import json
 import logging
@@ -175,16 +176,27 @@ class DashboardServer:
         self.host = host
         self.port = port
         self.api_key = api_key
+        self.api_key = api_key
         self._server: ThreadingHTTPServer | None = None
 
     def start(self) -> None:
         store = self.store
         responder = self.responder
         api_key = self.api_key
+        api_key = self.api_key
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
                 return
+
+            def _is_authorized(self) -> bool:
+                if not api_key:
+                    return True
+                header_key = self.headers.get("X-API-Key", "")
+                auth_header = self.headers.get("Authorization", "")
+                bearer = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+                candidate = header_key or bearer
+                return hmac.compare_digest(candidate, api_key)
 
             def _is_authorized(self) -> bool:
                 if not api_key:
@@ -252,7 +264,36 @@ class DashboardServer:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+                elif path == "/metrics":
+                    total, active, _ = store.get_summary_stats()
+                    alerts = store.get_recent_alerts(limit=10000)
+                    sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+                    for a in alerts:
+                        s = a.get("severity", "LOW")
+                        sev_counts[s] = sev_counts.get(s, 0) + 1
+                    lines = [
+                        "# HELP siem_alerts_total Total recorded security alerts",
+                        "# TYPE siem_alerts_total counter",
+                        f"siem_alerts_total {total}",
+                        "# HELP siem_active_bans Currently active IPS firewall bans",
+                        "# TYPE siem_active_bans gauge",
+                        f"siem_active_bans {active}",
+                        "# HELP siem_alerts_by_severity Security alerts partitioned by severity",
+                        "# TYPE siem_alerts_by_severity counter",
+                    ]
+                    for sev, cnt in sev_counts.items():
+                        lines.append(f'siem_alerts_by_severity{{severity="{sev}"}} {cnt}')
+                    body = ("\n".join(lines) + "\n").encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                    self._apply_security_headers()
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                 elif path == "/api/export":
+                    if not self._is_authorized():
+                        self._send_json({"error": "Unauthorized"}, status=401)
+                        return
                     if not self._is_authorized():
                         self._send_json({"error": "Unauthorized"}, status=401)
                         return
@@ -275,6 +316,9 @@ class DashboardServer:
             def do_POST(self):
                 if urlparse(self.path).path != "/api/unban":
                     self._send_json({"error": "Not found"}, status=404)
+                    return
+                if not self._is_authorized():
+                    self._send_json({"error": "Unauthorized"}, status=401)
                     return
                 if not self._is_authorized():
                     self._send_json({"error": "Unauthorized"}, status=401)
