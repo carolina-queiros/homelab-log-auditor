@@ -1,5 +1,13 @@
 # Homelab Log Auditor — Real-Time Mini-SIEM & Active IPS
 
+## System Architecture
+
+```mermaid
+flowchart LR
+    Logs --> Tailer --> Detector --> Store --> Dashboard
+    Detector --> Responder
+```
+
 Lightweight, production-hardened Intrusion Detection & Prevention System (Mini-SIEM & Active IPS) with real-time web observability, written in **pure Python** (standard library only, zero external dependencies).
 
 ## Key Capabilities & Architecture
@@ -25,7 +33,7 @@ Lightweight, production-hardened Intrusion Detection & Prevention System (Mini-S
 
 ## Quickstart & CLI Usage
 
-- **Run test suite (11 unit & integration tests):** `make test`
+- **Run test suite (12 unit & integration tests):** `make test`
 - **Start Web Dashboard (dry-run mode on port 8080):** `make run-web`
 - **Start active IPS enforcement on Linux:** `sudo python3 auditor.py --config config.json --enforce --web`
 - **Hot-reload rules without restart:** `kill -HUP $(pgrep -f auditor.py)`

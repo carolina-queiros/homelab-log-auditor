@@ -143,5 +143,22 @@ class TestMiniSIEM(unittest.TestCase):
                 server.stop()
 
 
+    def test_metrics_and_auth(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = IncidentStore(db_path=d + "/m.db")
+            st.register_ban("203.0.113.55", "WEB-SQLI-002", 300)
+            srv = DashboardServer(store=st, responder=FirewallResponder(dry_run=True), host="127.0.0.1", port=0, api_key="sec123")
+            srv.start()
+            port = srv._server.server_address[1]
+            try:
+                self.assertIn("siem_active_bans 1", urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics").read().decode())
+                with self.assertRaises(urllib.error.HTTPError) as c:
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/api/export")
+                self.assertEqual(c.exception.code, 401)
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/api/unban", data=json.dumps({"ip": "203.0.113.55"}).encode(), headers={"Content-Type": "application/json", "X-API-Key": "sec123"}, method="POST")
+                self.assertEqual(urllib.request.urlopen(req).status, 200)
+            finally:
+                srv.stop()
+
 if __name__ == "__main__":
     unittest.main()
