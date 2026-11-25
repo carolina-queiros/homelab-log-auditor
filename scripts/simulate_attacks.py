@@ -19,6 +19,7 @@ def main() -> int:
     access_path.touch(exist_ok=True)
 
     now_syslog = datetime.now(timezone.utc).strftime("%b %d %H:%M:%S")
+    now_clf = datetime.now(timezone.utc).strftime("%d/%b/%Y:%H:%M:%S +0000")
 
     auth_events = [
         f"{now_syslog} homelab sshd[1101]: Failed password for ops from 192.168.1.50 port 51200 ssh2",
@@ -29,14 +30,15 @@ def main() -> int:
         f"{now_syslog} homelab sshd[1106]: Failed password for invalid user postgres from 185.220.101.4 port 44124 ssh2",
     ]
 
-    # Bug: using syslog timestamp without brackets instead of HTTP Common Log Format [dd/Mon/YYYY:HH:MM:SS +0000]
     http_events = [
-        f'203.0.113.10 - - {now_syslog} "GET /index.html HTTP/1.1" 200 2048',
-        f'91.240.118.172 - - {now_syslog} "GET /login?user=admin%27%20OR%201=1-- HTTP/1.1" 200 512',
-        f'45.155.205.88 - - {now_syslog} "GET /download?file=../../../../etc/passwd HTTP/1.1" 403 198',
-        f'198.51.100.77 - - {now_syslog} "GET /wp-login.php HTTP/1.1" 404 162',
-        f'198.51.100.77 - - {now_syslog} "GET /.git/config HTTP/1.1" 404 162',
-        f'198.51.100.77 - - {now_syslog} "GET /phpmyadmin HTTP/1.1" 404 162',
+        f'203.0.113.10 - - [{now_clf}] "GET /index.html HTTP/1.1" 200 2048',
+        f'91.240.118.172 - - [{now_clf}] "GET /login?user=admin%27%20OR%201=1-- HTTP/1.1" 200 512',
+        f'45.155.205.88 - - [{now_clf}] "GET /download?file=../../../../etc/passwd HTTP/1.1" 403 198',
+        f'198.51.100.77 - - [{now_clf}] "GET /wp-login.php HTTP/1.1" 404 162',
+        f'198.51.100.77 - - [{now_clf}] "GET /.git/config HTTP/1.1" 404 162',
+        f'198.51.100.77 - - [{now_clf}] "GET /phpmyadmin HTTP/1.1" 404 162',
+        f'198.51.100.77 - - [{now_clf}] "GET /xmlrpc.php HTTP/1.1" 404 162',
+        f'198.51.100.77 - - [{now_clf}] "GET /wp-admin HTTP/1.1" 404 162',
     ]
 
     with auth_path.open("a", encoding="utf-8") as fh:
