@@ -1,48 +1,90 @@
-# Homelab Log Auditor — Real-Time Mini-SIEM & Active IPS
+# homelab-log-auditor
 
 [![CI](https://github.com/carolina-queiros/homelab-log-auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/carolina-queiros/homelab-log-auditor/actions/workflows/ci.yml)
 
-## System Architecture
+Real-time log monitoring and active intrusion prevention daemon (Mini-SIEM + IPS) written in Python for Linux servers. Tails SSH authentication and web access logs, correlates attack patterns across sliding time windows, enforces progressive firewall bans (`nftables`/`iptables`), persists incidents in SQLite, and exposes Prometheus metrics.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    Logs --> Tailer --> Detector --> Store --> Dashboard
-    Detector --> Responder
+    A["/var/log/auth.log<br/>/var/log/nginx/access.log"] --> B["LogTailer<br/>(Inode tracking)"]
+    B --> C["LogDetector<br/>(Sliding windows)"]
+    C --> D["FirewallResponder<br/>(nftables / iptables)"]
+    C --> E["IncidentStore<br/>(SQLite WAL)"]
+    D --> E
+    E --> F["SOC Dashboard & API<br/>(127.0.0.1:8080)"]
+    E --> G["Prometheus<br/>(GET /metrics)"]
 ```
 
-Lightweight, production-hardened Intrusion Detection & Prevention System (Mini-SIEM & Active IPS) with real-time web observability, written in **pure Python** (standard library only, zero external dependencies).
+## Detection Rules & Escalation
 
-## Key Capabilities & Architecture
-
-- **`engine/config.py` & `config.json`**: External JSON configuration loader with regex validation (`(?P<ip>...)`) and zero-downtime live rule reloading via POSIX `SIGHUP`.
-- **`engine/tailer.py`**: Continuous multi-file log follower (`tail -F`) resilient to log rotation (`copytruncate` and inode replacement).
-- **`engine/detector.py`**: Multi-vector detection engine combining built-in signatures, custom regex rules, and sliding-window temporal correlation.
-- **`engine/storage.py`**: SQLite persistence layer storing alerts, active bans, and **progressive ban escalation** (`1x` -> `4x` -> `16x`, capped at 7 days) for repeat offenders.
-- **`engine/responder.py`**: Active firewall enforcement via Linux `nftables` (with `iptables` fallback), CIDR whitelisting, and `--dry-run` simulation mode.
-- **`engine/dashboard.py`**: Multi-threaded HTTP server exposing a real-time observability dashboard (XSS-hardened DOM rendering, security headers) and REST API (`/api/stats`, `/api/alerts`, `/api/bans`, `/api/unban`, `/api/export`).
-- **`engine/notifier.py`**: Structured webhook notifications for Discord and Slack.
-- **`deploy/homelab-auditor.service` & `Dockerfile`**: Hardened `systemd` unit (`ProtectSystem=strict`, `CAP_NET_ADMIN`) and non-root container image (`USER auditor`).
-
-## Built-in Detection Rules
-
-| Rule ID | Severity | Log Source | Detection Logic |
+| Rule | Vector | Condition | Ban Policy (TTL) |
 | :--- | :--- | :--- | :--- |
-| `SSH-BRUTE-001` | `HIGH` | SSH (`auth.log`) | Flags *N* failed `password`/`publickey` logins within a configurable sliding window. |
-| `WEB-SQLI-002` | `CRITICAL` | HTTP Access Log | Detects SQL Injection payloads (`UNION SELECT`, `OR 1=1`, `SLEEP()`) in request URIs. |
-| `WEB-LFI-003` | `HIGH` | HTTP Access Log | Identifies Path Traversal and sensitive file probes (`../`, `/etc/passwd`, `.env`). |
-| `WEB-SCAN-004` | `MEDIUM` | HTTP Access Log | Correlates automated vulnerability scanning bursts (`/wp-login.php`, `/phpmyadmin`, `/.git/config`). |
-| `CUSTOM-SUDO-005` | `HIGH` | Auth / Custom Log | Example JSON-defined rule matching remote `sudo` authentication failures. |
+| `SSH-BRUTE-001` | SSH brute-force | >= 5 failed `sshd` attempts in `60s` | 1st: `5m` -> 2nd: `1h` -> 3rd: `24h` (cap `7d`) |
+| `WEB-SQLI-002` | SQLi / XSS / LFI | `UNION SELECT`, `OR 1=1`, `<script>`, `../etc/passwd` | Immediate block (`15m` base, exponential backoff) |
+| `WEB-SCAN-003` | HTTP enumeration | >= 15 `404`/`403` responses in `30s` | `10m` base (cap `7d`) |
 
-## Quickstart & CLI Usage
+## Security Controls
 
-- **Run test suite (12 unit & integration tests):** `make test`
-- **Start Web Dashboard (dry-run mode on port 8080):** `make run-web`
-- **Start active IPS enforcement on Linux:** `sudo python3 auditor.py --config config.json --enforce --web`
-- **Hot-reload rules without restart:** `kill -HUP $(pgrep -f auditor.py)`
-- **Print summary or export forensic reports:** `python3 auditor.py --report` / `--export-csv incidents.csv` / `--export-json incidents.json`
+* **Anti-self-lockout:** Local networks (`127.0.0.0/8`, RFC1918) and configured administrative CIDRs are bypassed prior to any enforcement action.
+* **Safe firewall execution:** `nft`/`iptables` commands run via `subprocess.run(..., shell=False)` after strict validation with `ipaddress.ip_address`.
+* **Restricted control plane:** The web server binds to `127.0.0.1` by default, sets `Content-Security-Policy` and `X-Frame-Options: DENY` headers, and requires `X-API-Key` on administrative endpoints (`/api/unban`, `/api/export`).
+* **Rotation & encoding resilience:** `LogTailer` tracks inode changes across `logrotate` cycles and decodes malformed byte sequences using `errors="replace"`.
 
-## Reproducible Attack Simulation
+## Usage
 
-1. Start the auditor watching temporary simulation logs: `mkdir -p /tmp/sim_logs && touch /tmp/sim_logs/auth.log /tmp/sim_logs/access.log && python3 auditor.py --logs /tmp/sim_logs/auth.log /tmp/sim_logs/access.log --threshold 3 --web`
-2. In a second terminal, inject SSH brute-force, SQLi, LFI, scanner bursts, and whitelisted traffic: `make demo`
-3. Open `http://127.0.0.1:8080` to inspect live alerts, active bans, and CSV/JSON exports.
+### Run in simulation mode (--dry-run)
+```bash
+git clone https://github.com/carolina-queiros/homelab-log-auditor.git
+cd homelab-log-auditor
+
+python3 auditor.py --auth-log /var/log/auth.log --web-log /var/log/nginx/access.log --db-path ./data/siem.db --api-key "change-in-production" --dry-run
+```
+
+### API & Prometheus Metrics
+```bash
+curl -s http://127.0.0.1:8080/metrics
+curl -H "X-API-Key: change-in-production" http://127.0.0.1:8080/api/export -o incidents.csv
+curl -X POST http://127.0.0.1:8080/api/unban -H "Content-Type: application/json" -H "X-API-Key: change-in-production" -d "{"ip": "203.0.113.55"}"
+```
+
+### systemd Service
+```ini
+[Unit]
+Description=Homelab Log Auditor
+After=network.target nftables.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/homelab-log-auditor
+Environment="SIEM_API_KEY=set-strong-secret"
+ExecStart=/usr/bin/python3 /opt/homelab-log-auditor/auditor.py --db-path /var/lib/homelab-siem/siem.db
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Structure & Tests
+
+```text
+homelab-log-auditor/
+├── engine/
+│   ├── config.py        # Runtime config, thresholds, and CIDR whitelists
+│   ├── tailer.py        # Continuous log reader with logrotate detection
+│   ├── detector.py      # Rule engine and sliding time windows
+│   ├── responder.py     # nftables/iptables integration and TTL escalation
+│   ├── storage.py       # SQLite persistence (incidents and active bans)
+│   └── dashboard.py     # HTTP server, REST API, CSV export, and /metrics
+├── tests/
+│   └── test_detector_and_ips.py  # 22 unit, concurrency, and security tests
+├── auditor.py           # CLI entrypoint
+└── Makefile             # lint and test targets
+```
+
+```bash
+make lint && make test
+```
