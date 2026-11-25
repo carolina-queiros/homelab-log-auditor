@@ -2,24 +2,27 @@ import ipaddress
 import logging
 import shutil
 import subprocess
-from typing import Iterable
 
-logger = logging.getLogger("homelab-auditor.responder")
+logger = logging.getLogger("homelab-auditor.ips")
 
 class FirewallResponder:
     """
-    Módulo de resposta ativa (IPS) que aplica bloqueios dinâmicos no Linux
-    via nftables (preferencial) ou iptables, com proteção contra auto-bloqueio.
+    Active Intrusion Prevention (IPS) module supporting Linux nftables (default)
+    and iptables fallback, with CIDR whitelisting to prevent self-lockout.
     """
 
-    DEFAULT_WHITELIST = ("127.0.0.0/8", "::1/128")
-
-    def __init__(self, dry_run: bool = True, whitelist_cidrs: Iterable[str] = ()):
+    def __init__(self, dry_run: bool = True, whitelist_cidrs: list[str] | None = None):
         self.dry_run = dry_run
         self.whitelist = [
-            ipaddress.ip_network(cidr, strict=False)
-            for cidr in (*self.DEFAULT_WHITELIST, *whitelist_cidrs)
+            ipaddress.ip_network("127.0.0.0/8"),
+            ipaddress.ip_network("::1/128"),
         ]
+        for cidr in whitelist_cidrs or []:
+            try:
+                self.whitelist.append(ipaddress.ip_network(cidr, strict=False))
+            except ValueError:
+                logger.warning(f"Invalid whitelist CIDR ignored: {cidr}")
+
         self.backend = self._detect_backend()
 
     def _detect_backend(self) -> str:
@@ -31,72 +34,50 @@ class FirewallResponder:
 
     def is_whitelisted(self, ip_str: str) -> bool:
         try:
-            addr = ipaddress.ip_address(ip_str)
-            return any(addr in net for net in self.whitelist)
+            ip = ipaddress.ip_address(ip_str)
+            return any(ip in net for net in self.whitelist)
         except ValueError:
             return True
 
-    def _ensure_nft_table(self) -> None:
-        subprocess.run(["nft", "add", "table", "inet", "homelab_ips"], check=False, capture_output=True)
-        subprocess.run(
-            ["nft", "add", "chain", "inet", "homelab_ips", "input", "{ type filter hook input priority 0 ; policy accept ; }"],
-            check=False,
-            capture_output=True,
-        )
-
-    def block_ip(self, ip: str, reason: str) -> bool:
-        if self.is_whitelisted(ip):
-            logger.warning(f"[WHITELIST] Bloqueio ignorado para IP protegido: {ip}")
+    def block_ip(self, ip_str: str, reason: str) -> bool:
+        if self.is_whitelisted(ip_str):
+            logger.info(f"[WHITELIST] Block ignored for protected IP: {ip_str}")
             return False
 
-        if self.dry_run:
-            logger.info(f"[DRY-RUN][IPS] Bloqueio simulado aplicado a {ip} | Motivo: {reason}")
+        if self.dry_run or self.backend == "none":
+            logger.warning(f"[DRY-RUN][IPS] Simulated block applied to {ip_str} | Reason: {reason}")
             return True
 
         try:
             if self.backend == "nftables":
-                self._ensure_nft_table()
+                subprocess.run(["nft", "add", "table", "inet", "homelab_ips"], check=False)
                 subprocess.run(
-                    ["nft", "add", "rule", "inet", "homelab_ips", "input", "ip", "saddr", ip, "drop"],
+                    ["nft", "add", "chain", "inet", "homelab_ips", "input", "{ type filter hook input priority 0; }"],
+                    check=False,
+                )
+                subprocess.run(
+                    ["nft", "add", "rule", "inet", "homelab_ips", "input", "ip", "saddr", ip_str, "drop"],
                     check=True,
-                    capture_output=True,
                 )
             elif self.backend == "iptables":
-                subprocess.run(
-                    ["iptables", "-I", "INPUT", "1", "-s", ip, "-j", "DROP"],
-                    check=True,
-                    capture_output=True,
-                )
-            else:
-                logger.error("Nenhum backend de firewall (nft/iptables) disponível neste sistema.")
-                return False
+                subprocess.run(["iptables", "-I", "INPUT", "-s", ip_str, "-j", "DROP"], check=True)
 
-            logger.warning(f"[IPS][{self.backend.upper()}] IP bloqueado na firewall: {ip} ({reason})")
+            logger.warning(f"[ENFORCE][IPS] IP {ip_str} blocked via {self.backend} | Reason: {reason}")
             return True
         except subprocess.CalledProcessError as exc:
-            logger.error(f"Falha ao aplicar regra de firewall para {ip}: {exc.stderr.decode().strip()}")
+            logger.error(f"Failed to execute firewall rule for {ip_str}: {exc}")
             return False
 
-    def unblock_ip(self, ip: str) -> bool:
-        if self.dry_run:
-            logger.info(f"[DRY-RUN][IPS] Expiração TTL — desbloqueio simulado para {ip}")
+    def unblock_ip(self, ip_str: str) -> bool:
+        if self.dry_run or self.backend == "none":
+            logger.info(f"[DRY-RUN][IPS] Simulated unblock for expired ban: {ip_str}")
             return True
 
         try:
             if self.backend == "iptables":
-                subprocess.run(["iptables", "-D", "INPUT", "-s", ip, "-j", "DROP"], check=True, capture_output=True)
-            elif self.backend == "nftables":
-                out = subprocess.check_output(["nft", "-a", "list", "chain", "inet", "homelab_ips", "input"], text=True)
-                for line in out.splitlines():
-                    if f"ip saddr {ip} drop" in line and "# handle " in line:
-                        handle = line.split("# handle ")[1].strip()
-                        subprocess.run(
-                            ["nft", "delete", "rule", "inet", "homelab_ips", "input", "handle", handle],
-                            check=True,
-                            capture_output=True,
-                        )
-            logger.info(f"[IPS][{self.backend.upper()}] IP desbloqueado após expiração TTL: {ip}")
+                subprocess.run(["iptables", "-D", "INPUT", "-s", ip_str, "-j", "DROP"], check=False)
+            logger.info(f"[ENFORCE][IPS] IP {ip_str} unblocked after TTL expiration.")
             return True
-        except Exception as exc:
-            logger.error(f"Erro ao desbloquear {ip}: {exc}")
+        except subprocess.CalledProcessError as exc:
+            logger.error(f"Failed to unblock IP {ip_str}: {exc}")
             return False

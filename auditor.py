@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import logging
 import os
 import signal
@@ -8,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from engine.config import AuditorConfig
-from engine.dashboard import DashboardServer
+from engine.dashboard import DashboardServer, render_alerts_csv
 from engine.detector import LogDetector
 from engine.notifier import WebhookNotifier
 from engine.responder import FirewallResponder
@@ -24,32 +25,34 @@ logger = logging.getLogger("homelab-auditor")
 
 def print_report(store: IncidentStore) -> None:
     total_alerts, active_bans, top_ips = store.get_summary_stats()
-    print("\n=== RELATÓRIO DE SEGURANÇA (HOMELAB MINI-SIEM) ===")
-    print(f"Gerado em (UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Total de incidentes registados: {total_alerts}")
-    print(f"Bloqueios IPS atualmente ativos: {active_bans}")
-    print("\nTop IPs ofensores:")
+    print("\n=== SECURITY INCIDENT REPORT (HOMELAB MINI-SIEM) ===")
+    print(f"Generated at (UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Total recorded alerts: {total_alerts}")
+    print(f"Currently active IPS bans: {active_bans}")
+    print("\nTop Offending Source IPs:")
     if not top_ips:
-        print("  (nenhum incidente registado)")
+        print("  (no incidents recorded)")
     for ip, count in top_ips:
-        print(f"  - {ip}: {count} alerta(s)")
-    print("==================================================\n")
+        print(f"  - {ip}: {count} alert(s)")
+    print("====================================================\n")
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Homelab Log Auditor — Mini-SIEM & IPS em tempo real")
-    parser.add_argument("--config", default="config.json", help="Ficheiro de configuração JSON")
-    parser.add_argument("--logs", nargs="+", help="Sobrepõe ficheiros de log a monitorizar")
-    parser.add_argument("--db", help="Sobrepõe caminho para a base de dados SQLite")
-    parser.add_argument("--threshold", type=int, help="Sobrepõe número de falhas até bloquear")
-    parser.add_argument("--window", type=int, help="Sobrepõe janela temporal em segundos")
-    parser.add_argument("--ban-ttl", type=int, help="Sobrepõe duração do bloqueio IPS em segundos")
-    parser.add_argument("--whitelist", nargs="*", help="Sobrepõe CIDRs/IPs protegidos")
-    parser.add_argument("--webhook", default=os.getenv("AUDITOR_WEBHOOK_URL"), help="URL de webhook Discord/Slack")
-    parser.add_argument("--enforce", action="store_true", help="Ativa regras reais na firewall")
-    parser.add_argument("--from-start", action="store_true", help="Lê os logs desde o início")
-    parser.add_argument("--report", action="store_true", help="Mostra o resumo estatístico e sai")
-    parser.add_argument("--web", action="store_true", help="Ativa o dashboard web e API REST")
-    parser.add_argument("--web-port", type=int, default=8080, help="Porta do servidor web (default: 8080)")
+    parser = argparse.ArgumentParser(description="Homelab Log Auditor — Real-time Mini-SIEM & Active IPS")
+    parser.add_argument("--config", default="config.json", help="Path to JSON configuration file")
+    parser.add_argument("--logs", nargs="+", help="Override log file paths to monitor")
+    parser.add_argument("--db", help="Override SQLite database path")
+    parser.add_argument("--threshold", type=int, help="Override brute-force failure threshold")
+    parser.add_argument("--window", type=int, help="Override sliding window in seconds")
+    parser.add_argument("--ban-ttl", type=int, help="Override base IPS ban TTL in seconds")
+    parser.add_argument("--whitelist", nargs="*", help="Override protected CIDR/IP list")
+    parser.add_argument("--webhook", default=os.getenv("AUDITOR_WEBHOOK_URL"), help="Discord/Slack webhook URL")
+    parser.add_argument("--enforce", action="store_true", help="Enable active firewall enforcement (nftables/iptables)")
+    parser.add_argument("--from-start", action="store_true", help="Process existing log files from beginning")
+    parser.add_argument("--report", action="store_true", help="Print summary security report and exit")
+    parser.add_argument("--export-csv", help="Export recorded alerts to a CSV file and exit")
+    parser.add_argument("--export-json", help="Export recorded alerts to a JSON file and exit")
+    parser.add_argument("--web", action="store_true", help="Start real-time Web Dashboard and REST API")
+    parser.add_argument("--web-port", type=int, default=8080, help="HTTP port for Web Dashboard (default: 8080)")
     args = parser.parse_args()
 
     cfg = AuditorConfig.from_file(args.config)
@@ -67,6 +70,18 @@ def main() -> int:
         print_report(store)
         return 0
 
+    if args.export_csv:
+        alerts = store.get_recent_alerts(limit=10000)
+        Path(args.export_csv).write_text(render_alerts_csv(alerts), encoding="utf-8")
+        logger.info(f"Exported {len(alerts)} alert(s) to CSV: {args.export_csv}")
+        return 0
+
+    if args.export_json:
+        alerts = store.get_recent_alerts(limit=10000)
+        Path(args.export_json).write_text(json.dumps(alerts, indent=2), encoding="utf-8")
+        logger.info(f"Exported {len(alerts)} alert(s) to JSON: {args.export_json}")
+        return 0
+
     detector = LogDetector(
         brute_force_threshold=threshold,
         window_seconds=window,
@@ -80,22 +95,22 @@ def main() -> int:
         dashboard.start()
 
     def reload_config(*_args) -> None:
-        logger.info(f"Sinal SIGHUP recebido: a recarregar regras de '{args.config}'...")
+        logger.info(f"SIGHUP received: reloading rules from '{args.config}'...")
         new_cfg = AuditorConfig.from_file(args.config)
         detector.update_rules(
             brute_force_threshold=args.threshold if args.threshold is not None else new_cfg.brute_force_threshold,
             window_seconds=args.window if args.window is not None else new_cfg.window_seconds,
             custom_rules=new_cfg.custom_rules,
         )
-        logger.info(f"Configuração recarregada ({len(new_cfg.custom_rules)} regra(s) customizada(s) ativa(s)).")
+        logger.info(f"Configuration reloaded ({len(new_cfg.custom_rules)} custom rule(s) active).")
 
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, reload_config)
 
-    mode = "ENFORCE (FIREWALL ATIVA)" if enforce else "DRY-RUN (SIMULAÇÃO)"
-    logger.info(f"A iniciar Homelab Log Auditor em modo {mode} | Backend: {responder.backend}")
+    mode = "ENFORCE (ACTIVE FIREWALL)" if enforce else "DRY-RUN (SIMULATION)"
+    logger.info(f"Starting Homelab Log Auditor in {mode} mode | Backend: {responder.backend}")
 
     def handle_line(line: str, source: Path) -> None:
         alert = detector.inspect_line(line)
@@ -110,7 +125,7 @@ def main() -> int:
 
         if responder.block_ip(alert.source_ip, alert.description):
             applied_ttl = store.register_ban(alert.source_ip, alert.rule_id, base_ttl_seconds=ban_ttl)
-            notifier.send_alert(alert, f"Bloqueado por {applied_ttl}s ({responder.backend})")
+            notifier.send_alert(alert, f"Blocked for {applied_ttl}s ({responder.backend})")
 
     def cleanup_expired() -> None:
         for ip in store.get_expired_bans():
@@ -122,7 +137,7 @@ def main() -> int:
     except SystemExit:
         if dashboard:
             dashboard.stop()
-        logger.info("A encerrar Homelab Log Auditor de forma limpa.")
+        logger.info("Shutting down Homelab Log Auditor cleanly.")
     return 0
 
 if __name__ == "__main__":

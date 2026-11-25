@@ -1,9 +1,12 @@
+import csv
+import io
 import ipaddress
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from engine.responder import FirewallResponder
 from engine.storage import IncidentStore
@@ -11,13 +14,16 @@ from engine.storage import IncidentStore
 logger = logging.getLogger("homelab-auditor.dashboard")
 
 DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="pt">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Homelab Mini-SIEM &amp; IPS Dashboard</title>
+  <title>Homelab Mini-SIEM &amp; Active IPS Dashboard</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
-    h1 { font-size: 1.5rem; margin-bottom: 16px; color: #38bdf8; }
+    .header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+    h1 { font-size: 1.5rem; margin: 0; color: #38bdf8; }
+    .exports a { background: #1e293b; color: #38bdf8; border: 1px solid #334155; padding: 6px 12px; border-radius: 6px; text-decoration: none; font-size: 0.85rem; font-weight: 600; margin-left: 8px; }
+    .exports a:hover { background: #334155; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
     .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 16px; }
     .metric { font-size: 2rem; font-weight: 700; color: #f8fafc; }
@@ -35,21 +41,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h1>Homelab Log Auditor — Mini-SIEM &amp; Active IPS</h1>
+  <div class="header">
+    <h1>Homelab Log Auditor — Mini-SIEM &amp; Active IPS</h1>
+    <div class="exports">
+      <a href="/api/export?format=csv">Export CSV</a>
+      <a href="/api/export?format=json">Export JSON</a>
+    </div>
+  </div>
   <div class="grid">
-    <div class="card"><div>Total de Incidentes</div><div id="total-alerts" class="metric">-</div></div>
-    <div class="card"><div>Bloqueios IPS Ativos</div><div id="active-bans" class="metric">-</div></div>
+    <div class="card"><div>Total Incidents</div><div id="total-alerts" class="metric">-</div></div>
+    <div class="card"><div>Active IPS Bans</div><div id="active-bans" class="metric">-</div></div>
   </div>
 
-  <h2>Bloqueios Ativos (IPS)</h2>
+  <h2>Active Bans (IPS)</h2>
   <table>
-    <thead><tr><th>IP</th><th>Regra</th><th>Tempo Restante</th><th>Ação</th></tr></thead>
+    <thead><tr><th>IP Address</th><th>Rule</th><th>Remaining TTL</th><th>Action</th></tr></thead>
     <tbody id="bans-body"></tbody>
   </table>
 
-  <h2>Alertas Recentes</h2>
+  <h2>Recent Security Alerts</h2>
   <table>
-    <thead><tr><th>Severidade</th><th>Regra</th><th>IP Origem</th><th>Descrição</th><th>Log Bruto</th></tr></thead>
+    <thead><tr><th>Severity</th><th>Rule</th><th>Source IP</th><th>Description</th><th>Raw Log</th></tr></thead>
     <tbody id="alerts-body"></tbody>
   </table>
 
@@ -92,7 +104,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const tr = document.createElement('tr');
         const td = document.createElement('td');
         td.colSpan = 4;
-        td.textContent = 'Sem bloqueios ativos';
+        td.textContent = 'No active bans';
         tr.appendChild(td);
         bansBody.appendChild(tr);
       } else {
@@ -103,7 +115,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           tr.appendChild(cellWithText(`${b.remaining_seconds}s`));
           const actionTd = document.createElement('td');
           const btn = document.createElement('button');
-          btn.textContent = 'Desbloquear';
+          btn.textContent = 'Unban';
           btn.addEventListener('click', () => unbanIp(b.ip));
           actionTd.appendChild(btn);
           tr.appendChild(actionTd);
@@ -117,7 +129,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const tr = document.createElement('tr');
         const td = document.createElement('td');
         td.colSpan = 5;
-        td.textContent = 'Sem alertas registados';
+        td.textContent = 'No security alerts recorded';
         tr.appendChild(td);
         alertsBody.appendChild(tr);
       } else {
@@ -146,6 +158,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </html>
 """
 
+def render_alerts_csv(alerts: list[dict]) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["id", "timestamp_utc", "rule_id", "severity", "source_ip", "description", "raw_log"])
+    for a in alerts:
+        ts_iso = datetime.fromtimestamp(a["timestamp"], tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        writer.writerow([a["id"], ts_iso, a["rule_id"], a["severity"], a["source_ip"], a["description"], a["raw_log"]])
+    return buf.getvalue()
+
 class DashboardServer:
     def __init__(self, store: IncidentStore, responder: FirewallResponder, host: str = "127.0.0.1", port: int = 8080):
         self.store = store
@@ -167,7 +188,7 @@ class DashboardServer:
                 self.send_header("X-Frame-Options", "DENY")
 
             def _send_json(self, data, status: int = 200):
-                body = json.dumps(data).encode("utf-8")
+                body = json.dumps(data, indent=2).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self._apply_security_headers()
@@ -176,7 +197,8 @@ class DashboardServer:
                 self.wfile.write(body)
 
             def do_GET(self):
-                path = urlparse(self.path).path
+                parsed = urlparse(self.path)
+                path = parsed.path
                 if path == "/":
                     html = DASHBOARD_HTML.encode("utf-8")
                     self.send_response(200)
@@ -192,6 +214,20 @@ class DashboardServer:
                     self._send_json(store.get_active_bans_list())
                 elif path == "/api/alerts":
                     self._send_json(store.get_recent_alerts(limit=25))
+                elif path == "/api/export":
+                    fmt = parse_qs(parsed.query).get("format", ["json"])[0].lower()
+                    alerts = store.get_recent_alerts(limit=1000)
+                    if fmt == "csv":
+                        body = render_alerts_csv(alerts).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/csv; charset=utf-8")
+                        self.send_header("Content-Disposition", 'attachment; filename="siem_incidents.csv"')
+                        self._apply_security_headers()
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                    else:
+                        self._send_json(alerts)
                 else:
                     self._send_json({"error": "Not found"}, status=404)
 
@@ -218,7 +254,7 @@ class DashboardServer:
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         thread.start()
-        logger.info(f"Dashboard Web & API REST ativos em http://{self.host}:{self.port}")
+        logger.info(f"Web Dashboard & REST API listening on http://{self.host}:{self.port}")
 
     def stop(self) -> None:
         if self._server:
