@@ -1,62 +1,88 @@
+import logging
 import os
 import time
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Optional
+
+logger = logging.getLogger("homelab-auditor.tailer")
+
 
 class LogTailer:
     """
-    Monitoriza múltiplos ficheiros de log em tempo real (equivalente a tail -F),
-    detetando rotação de logs (mudança de inode ou truncagem) sem perder eventos.
+    Continuous multi-file log follower (tail -F semantics) resilient to
+    copytruncate and inode-replacement log rotation.
     """
 
-    def __init__(self, file_paths: Iterable[str], poll_interval: float = 0.25):
+    def __init__(self, file_paths: list[str], poll_interval: float = 0.25):
         self.paths = [Path(p) for p in file_paths]
         self.poll_interval = poll_interval
-        self._handles: dict[Path, tuple[object, int]] = {}
+        self._running = False
+        self._handles: dict[Path, object] = {}
+        self._inodes: dict[Path, int] = {}
 
-    def _sync_handles(self, from_end: bool = False) -> None:
-        for path in self.paths:
-            if not path.exists():
-                continue
-            stat = path.stat()
-            current = self._handles.get(path)
+    def stop(self) -> None:
+        self._running = False
 
-            if current is None:
-                fh = open(path, "r", encoding="utf-8", errors="replace")
-                if from_end:
-                    fh.seek(0, os.SEEK_END)
-                self._handles[path] = (fh, stat.st_ino)
-            else:
-                fh, old_ino = current
-                # Deteta rotação por rename/create (novo inode) ou truncagem (copytruncate)
-                if stat.st_ino != old_ino or stat.st_size < fh.tell():
-                    fh.close()
-                    new_fh = open(path, "r", encoding="utf-8", errors="replace")
-                    self._handles[path] = (new_fh, stat.st_ino)
+    def _open_file(self, path: Path, from_end: bool = True) -> None:
+        if not path.exists():
+            return
+        try:
+            fh = path.open("r", encoding="utf-8", errors="replace")
+            if from_end:
+                fh.seek(0, os.SEEK_END)
+            self._handles[path] = fh
+            self._inodes[path] = path.stat().st_ino
+        except OSError as exc:
+            logger.debug(f"Could not open log file '{path}': {exc}")
 
     def follow(
         self,
         on_line: Callable[[str, Path], None],
-        tick_callback: Callable[[], None] | None = None,
+        tick_callback: Optional[Callable[[], None]] = None,
         from_end: bool = True,
     ) -> None:
-        self._sync_handles(from_end=from_end)
+        for path in self.paths:
+            self._open_file(path, from_end=from_end)
+
+        self._running = True
         try:
-            while True:
-                self._sync_handles(from_end=False)
-                had_data = False
-                for path, (fh, _) in list(self._handles.items()):
-                    line = fh.readline()
-                    while line:
-                        had_data = True
-                        on_line(line, path)
+            while self._running:
+                for path in self.paths:
+                    if not path.exists():
+                        if path in self._handles:
+                            self._handles[path].close()
+                            del self._handles[path]
+                            self._inodes.pop(path, None)
+                        continue
+
+                    if path not in self._handles:
+                        self._open_file(path, from_end=False)
+                        if path not in self._handles:
+                            continue
+
+                    fh = self._handles[path]
+                    try:
+                        stat = path.stat()
+                        if stat.st_ino != self._inodes.get(path) or stat.st_size < fh.tell():
+                            fh.close()
+                            self._open_file(path, from_end=False)
+                            fh = self._handles[path]
+                    except OSError:
+                        continue
+
+                    while self._running:
                         line = fh.readline()
+                        if not line:
+                            break
+                        on_line(line, path)
 
                 if tick_callback:
                     tick_callback()
-
-                if not had_data:
-                    time.sleep(self.poll_interval)
+                time.sleep(self.poll_interval)
         finally:
-            for fh, _ in self._handles.values():
-                fh.close()
+            for fh in self._handles.values():
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+            self._handles.clear()
