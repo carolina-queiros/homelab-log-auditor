@@ -1,41 +1,38 @@
-# Homelab Log Auditor (Mini-SIEM & Active IPS)
+# Homelab Log Auditor — Real-Time Mini-SIEM & Active IPS
 
-Sistema leve de deteção de intrusões (SIEM), resposta ativa na firewall (IPS) e observabilidade em tempo real para ambientes Linux, escrito em Python puro (biblioteca padrão, zero dependências externas).
+Lightweight, production-hardened Intrusion Detection & Prevention System (Mini-SIEM & Active IPS) with real-time web observability, written in **pure Python** (standard library only, zero external dependencies).
 
-## Arquitetura Modular
+## Key Capabilities & Architecture
 
-- **`engine/config.py` & `config.json`**: Gestão de configuração externa com validação de expressões regulares e suporte para recarga dinâmica sem paragem via sinal `SIGHUP`.
-- **`engine/tailer.py`**: Leitor contínuo de logs (`tail -F`) com deteção automática de *log rotation* por alteração de *inode* ou truncagem.
-- **`engine/detector.py`**: Motor de análise por regras Regex (nativas + customizadas) e correlação temporal (*sliding window*).
-- **`engine/storage.py`**: Persistência em SQLite para alertas, bloqueios ativos com TTL e **ban progressivo (*escalation*)** para IPs reincidentes (`1x` $\rightarrow$ `4x` $\rightarrow$ `16x`, até ao teto de 7 dias).
-- **`engine/responder.py`**: Módulo IPS que aplica bloqueios dinâmicos na firewall Linux via `nftables` (com *fallback* para `iptables`), *whitelist* CIDR e modo `--dry-run`.
-- **`engine/dashboard.py`**: Servidor HTTP multi-thread com API REST (`/api/stats`, `/api/alerts`, `/api/bans`, `/api/unban`) e dashboard web em tempo real protegido contra XSS.
-- **`engine/notifier.py`**: Alertas estruturados via Webhook (Discord/Slack).
-- **`deploy/` & `Dockerfile`**: Unit `systemd` endurecida (`ProtectSystem=strict`, `CAP_NET_ADMIN`) e imagem Docker sem privilégios (`USER auditor`).
+- **`engine/config.py` & `config.json`**: External JSON configuration loader with regex validation (`(?P<ip>...)`) and zero-downtime live rule reloading via POSIX `SIGHUP`.
+- **`engine/tailer.py`**: Continuous multi-file log follower (`tail -F`) resilient to log rotation (`copytruncate` and inode replacement).
+- **`engine/detector.py`**: Multi-vector detection engine combining built-in signatures, custom regex rules, and sliding-window temporal correlation.
+- **`engine/storage.py`**: SQLite persistence layer storing alerts, active bans, and **progressive ban escalation** (`1x` -> `4x` -> `16x`, capped at 7 days) for repeat offenders.
+- **`engine/responder.py`**: Active firewall enforcement via Linux `nftables` (with `iptables` fallback), CIDR whitelisting, and `--dry-run` simulation mode.
+- **`engine/dashboard.py`**: Multi-threaded HTTP server exposing a real-time observability dashboard (XSS-hardened DOM rendering, security headers) and REST API (`/api/stats`, `/api/alerts`, `/api/bans`, `/api/unban`, `/api/export`).
+- **`engine/notifier.py`**: Structured webhook notifications for Discord and Slack.
+- **`deploy/homelab-auditor.service` & `Dockerfile`**: Hardened `systemd` unit (`ProtectSystem=strict`, `CAP_NET_ADMIN`) and non-root container image (`USER auditor`).
 
-## Regras de Deteção Nativas
+## Built-in Detection Rules
 
-| ID | Severidade | Vetor | Descrição |
+| Rule ID | Severity | Log Source | Detection Logic |
 | :--- | :--- | :--- | :--- |
-| `SSH-BRUTE-001` | `HIGH` | SSH (`auth.log`) | Deteta *N* falhas de autenticação (`password` ou `publickey`, incluindo `invalid user`) numa janela temporal configurável. |
-| `WEB-SQLI-002` | `CRITICAL` | HTTP Access Log | Identifica payloads de SQL Injection (`UNION SELECT`, `OR 1=1`, `SLEEP()`, etc.) nos pedidos. |
-| `WEB-LFI-003` | `HIGH` | HTTP Access Log | Deteta tentativas de *Path Traversal* (`../`, `/etc/passwd`, `.env`). |
-| `WEB-SCAN-004` | `MEDIUM` | HTTP Access Log | Deteta enumeração automatizada de caminhos sensíveis (`/wp-login.php`, `/phpmyadmin`, `/.git/config`). |
+| `SSH-BRUTE-001` | `HIGH` | SSH (`auth.log`) | Flags *N* failed `password`/`publickey` logins within a configurable sliding window. |
+| `WEB-SQLI-002` | `CRITICAL` | HTTP Access Log | Detects SQL Injection payloads (`UNION SELECT`, `OR 1=1`, `SLEEP()`) in request URIs. |
+| `WEB-LFI-003` | `HIGH` | HTTP Access Log | Identifies Path Traversal and sensitive file probes (`../`, `/etc/passwd`, `.env`). |
+| `WEB-SCAN-004` | `MEDIUM` | HTTP Access Log | Correlates automated vulnerability scanning bursts (`/wp-login.php`, `/phpmyadmin`, `/.git/config`). |
+| `CUSTOM-SUDO-005` | `HIGH` | Auth / Custom Log | Example JSON-defined rule matching remote `sudo` authentication failures. |
 
-## Utilização
+## Quickstart & CLI Usage
 
-```bash
-# Modo simulação (dry-run) com dashboard web ativo em [http://127.0.0.1:8080](http://127.0.0.1:8080)
-python3 auditor.py --config config.json --web
+- **Run test suite (11 unit & integration tests):** `make test`
+- **Start Web Dashboard (dry-run mode on port 8080):** `make run-web`
+- **Start active IPS enforcement on Linux:** `sudo python3 auditor.py --config config.json --enforce --web`
+- **Hot-reload rules without restart:** `kill -HUP $(pgrep -f auditor.py)`
+- **Print summary or export forensic reports:** `python3 auditor.py --report` / `--export-csv incidents.csv` / `--export-json incidents.json`
 
-# Modo ativo (IPS) com bloqueio real via nftables/iptables
-sudo python3 auditor.py --config config.json --enforce --web
+## Reproducible Attack Simulation
 
-# Recarregar regras do config.json em tempo real sem reiniciar o daemon
-kill -HUP $(pgrep -f auditor.py)
-
-# Consultar relatório estatístico na consola
-python3 auditor.py --report
-
-# Executar suíte completa de testes unitários
-python3 -m unittest discover -s tests -v
+1. Start the auditor watching temporary simulation logs: `mkdir -p /tmp/sim_logs && touch /tmp/sim_logs/auth.log /tmp/sim_logs/access.log && python3 auditor.py --logs /tmp/sim_logs/auth.log /tmp/sim_logs/access.log --threshold 3 --web`
+2. In a second terminal, inject SSH brute-force, SQLi, LFI, scanner bursts, and whitelisted traffic: `make demo`
+3. Open `http://127.0.0.1:8080` to inspect live alerts, active bans, and CSV/JSON exports.
