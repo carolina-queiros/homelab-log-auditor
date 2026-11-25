@@ -160,5 +160,151 @@ class TestMiniSIEM(unittest.TestCase):
             finally:
                 srv.stop()
 
+
+    def test_api_unban_rejects_command_injection_and_invalid_ip(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = IncidentStore(db_path=d + "/inj.db")
+            srv = DashboardServer(store=st, responder=FirewallResponder(dry_run=True), host="127.0.0.1", port=0)
+            srv.start()
+            port = srv._server.server_address[1]
+            try:
+                for bad_ip in ["203.0.113.55; rm -rf /", "999.999.1.1", "", "$(whoami)"]:
+                    req = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/api/unban",
+                        data=json.dumps({"ip": bad_ip}).encode(),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(req)
+                    self.assertEqual(ctx.exception.code, 400)
+            finally:
+                srv.stop()
+
+    def test_api_auth_rejects_wrong_api_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = IncidentStore(db_path=d + "/auth.db")
+            srv = DashboardServer(store=st, responder=FirewallResponder(dry_run=True), host="127.0.0.1", port=0, api_key="correct-key")
+            srv.start()
+            port = srv._server.server_address[1]
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/export",
+                    headers={"X-API-Key": "wrong-key"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req)
+                self.assertEqual(ctx.exception.code, 401)
+            finally:
+                srv.stop()
+
+    def test_api_unban_rejects_malformed_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = IncidentStore(db_path=d + "/malformed.db")
+            srv = DashboardServer(store=st, responder=FirewallResponder(dry_run=True), host="127.0.0.1", port=0)
+            srv.start()
+            port = srv._server.server_address[1]
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/unban",
+                    data=b"{not-valid-json",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req)
+                self.assertEqual(ctx.exception.code, 400)
+            finally:
+                srv.stop()
+
+    def test_sqlite_ban_persists_across_store_reopen(self):
+        with tempfile.TemporaryDirectory() as d:
+            db_file = d + "/persist.db"
+            st1 = IncidentStore(db_path=db_file)
+            st1.register_ban("198.51.100.77", "SSH-BRUTE-001", 600)
+            del st1
+
+            st2 = IncidentStore(db_path=db_file)
+            active_ips = [b["ip"] for b in st2.get_active_bans_list()]
+            self.assertIn("198.51.100.77", active_ips)
+
+    def test_sqlite_expired_ban_not_returned_as_active(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = IncidentStore(db_path=d + "/ttl.db")
+            st.register_ban("198.51.100.88", "WEB-SQLI-002", -10)
+            active_ips = [b["ip"] for b in st.get_active_bans_list()]
+            self.assertNotIn("198.51.100.88", active_ips)
+
+    def test_concurrent_sqlite_reads_and_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = IncidentStore(db_path=d + "/concurrent.db")
+            errors = []
+
+            def writer(idx):
+                try:
+                    for j in range(15):
+                        st.register_ban(f"198.51.{idx}.{j + 1}", "SSH-BRUTE-001", 120)
+                except Exception as exc:
+                    errors.append(exc)
+
+            def reader():
+                try:
+                    for _ in range(20):
+                        _ = st.get_active_bans_list()
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=writer, args=(i,)) for i in range(3)] + [
+                threading.Thread(target=reader) for _ in range(2)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(st.get_active_bans_list()), 45)
+
+    def test_log_tailer_handles_corrupted_non_utf8_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            log_path = Path(d) / "corrupt.log"
+            log_path.write_bytes(
+                b"\xff\xfe invalid bytes\nNov 23 14:10:01 host sshd[1]: Accepted publickey for user from 10.0.0.5 port 22 ssh2\n"
+            )
+            lines = []
+            def _collect(line, _path):
+                lines.append(line)
+                if len(lines) >= 2:
+                    raise StopIteration()
+            tailer = LogTailer([log_path], poll_interval=0.01)
+            try:
+                tailer.follow(_collect, from_end=False)
+            except StopIteration:
+                pass
+            self.assertEqual(len(lines), 2)
+            self.assertIn("Accepted publickey", lines[1])
+
+    def test_http_xss_and_path_traversal_detection(self):
+        detector = LogDetector()
+        lfi_line = '198.51.100.42 - - [23/Nov/2026:14:22:01 +0000] "GET /../../etc/passwd HTTP/1.1" 404 512'
+        alert = detector.inspect_line(lfi_line, now=500.0)
+        self.assertIsNotNone(alert)
+        self.assertEqual(alert.source_ip, "198.51.100.42")
+
+    def test_firewall_responder_dry_run_ipv6_support(self):
+        responder = FirewallResponder(dry_run=True)
+        result = responder.block_ip("2001:db8::dead:beef", reason="IPv6 brute force")
+        self.assertTrue(result)
+
+    def test_detector_throughput_benchmark(self):
+        detector = LogDetector(brute_force_threshold=100000, window_seconds=60)
+        benign = '192.0.2.10 - - [23/Nov/2026:14:25:00 +0000] "GET /index.html HTTP/1.1" 200 1024'
+        t0 = time.perf_counter()
+        for i in range(2000):
+            detector.inspect_line(benign, now=1000.0 + (i * 0.001))
+        elapsed = time.perf_counter() - t0
+        self.assertLess(elapsed, 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()
